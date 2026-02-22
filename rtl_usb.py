@@ -489,37 +489,16 @@ class Rtl2832u:
             # Mix / normal datapath
             self.write_reg(SYSB, DEMOD_CTL_1, 0x22, 1)
             self.demod_write_reg(0, 0x06, 0x80, 1)
+            self._set_if_freq(0)
         elif mode == 1:
             print("[rtl2832u] Direct sampling ENABLED (I-ADC)")
             self.demod_write_reg(0, 0x19, 0x05, 1)  # Bypass mixer
             self.write_reg(SYSB, DEMOD_CTL_1, 0x22, 1)
-            self.demod_write_reg(0, 0x06, 0x80, 1)
+            self.demod_write_reg(0, 0x06, 0x90, 1)
         elif mode == 2:
             print("[rtl2832u] Direct sampling ENABLED (Q-ADC)")
             self.demod_write_reg(0, 0x19, 0x05, 1)
             self.write_reg(SYSB, DEMOD_CTL_1, 0x22, 1)
-            self.demod_write_reg(0, 0x06, 0x80, 1)
-            
-        # The exact implementation for RTL2832U direct sampling swaps the ADC inputs
-        if mode == 0:
-            self._set_if_freq(0)
-            # Not writing out all direct sampling toggles to keep it simple,
-            # but usually you write 0x90 to page 0 reg 0x06 for I or 0xB0 for Q, 
-            # and toggle the IF. Let's do the correct librtlsdr register writes:
-            
-        if mode == 0:
-            # off
-            self.demod_write_reg(0, 0x06, 0x80, 1)
-            self.demod_write_reg(0, 0x19, 0x05, 1)
-        elif mode == 1:
-            # I
-            self.demod_write_reg(0, 0x06, 0x80, 1)
-            self.demod_write_reg(0, 0x19, 0x05, 1)
-            self.demod_write_reg(0, 0x06, 0x90, 1)
-        elif mode == 2:
-            # Q
-            self.demod_write_reg(0, 0x06, 0x80, 1)
-            self.demod_write_reg(0, 0x19, 0x05, 1)
             self.demod_write_reg(0, 0x06, 0xB0, 1)
 
         # Reset demod
@@ -776,8 +755,8 @@ class R820T2:
             self._write_reg_mask(0x10, 0x00, 0x10)  # refdiv2 = 0
             pll_ref_sdm = 2 * pll_ref
 
-        # Clamp nint to valid range (13..76 per R820T2 datasheet)
-        nint = max(13, min(76, nint))
+        # Clamp nint to valid range (13..268 per R820T2 datasheet/bit fields)
+        nint = max(13, min(268, nint))
 
         # Decompose nint into NI and SI fields
         # nint = 4*ni + si + 13, where si is in [0..3]

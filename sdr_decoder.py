@@ -163,8 +163,8 @@ class WinAudioOut:
         self._opened = True
         # _bufs stores ctypes c_char array objects (from create_string_buffer),
         # not plain bytes – typed as Any because ctypes buffer types are opaque.
-        self._bufs: list[Any]            = [None] * num_buffers
-        self._hdrs: list[WAVEHDR | None] = [None] * num_buffers
+        self._bufs: list[Any]            = [None for _ in range(num_buffers)]
+        self._hdrs: list[WAVEHDR | None] = [None for _ in range(num_buffers)]
 
     # ------------------------------------------------------------------
     def play_chunk(self, data: bytes) -> None:
@@ -325,7 +325,7 @@ class RtlTcpClient:
             raise RuntimeError(f"rtl_tcp did not send magic header: {exc}") from exc
 
         # Switch to blocking mode with no timeout for the streaming phase
-        self._sock.settimeout(None)
+        sock.settimeout(None)
 
         tag, tuner_type, gain_count = struct.unpack('>4sII', magic)
         tuner_name = self.TUNER_NAMES.get(tuner_type, f'type={tuner_type}')
@@ -380,6 +380,8 @@ class RtlTcpClient:
         return self._read_exactly(num_bytes)
 
     def _read_exactly(self, num_bytes: int) -> bytes:
+        if self._sock is None:
+            raise ConnectionError("Socket not connected")
         buf      = bytearray(num_bytes)
         view     = memoryview(buf)
         received = 0
@@ -391,9 +393,10 @@ class RtlTcpClient:
         return bytes(buf)
 
     def close(self) -> None:
-        if self._sock is not None:
+        sock = self._sock
+        if sock is not None:
             try:
-                self._sock.close()
+                sock.close()
             except OSError:
                 pass
             self._sock = None
