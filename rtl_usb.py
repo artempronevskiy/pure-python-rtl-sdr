@@ -22,7 +22,6 @@ import ctypes
 import ctypes.wintypes as wt
 import socket
 import struct
-import sys
 import threading
 import time
 
@@ -40,7 +39,6 @@ FILE_SHARE_READ     = 1
 FILE_SHARE_WRITE    = 2
 OPEN_EXISTING       = 3
 FILE_ATTRIBUTE_NORMAL  = 0x80
-FILE_FLAG_OVERLAPPED   = 0x40000000
 DIGCF_PRESENT          = 0x02
 DIGCF_DEVICEINTERFACE  = 0x10
 ERROR_NO_MORE_ITEMS    = 259
@@ -61,27 +59,23 @@ class SP_DEVICE_INTERFACE_DATA(ctypes.Structure):
     ]
 
 
-class WINUSB_SETUP_PACKET(ctypes.Structure):
-    """8-byte USB setup packet, passed by reference to WinUsb_ControlTransfer."""
-    _pack_ = 1  # CRITICAL: must be byte-packed, no padding
-    _fields_ = [
-        ("RequestType", ctypes.c_ubyte),
-        ("Request",     ctypes.c_ubyte),
-        ("Value",       ctypes.c_ushort),
-        ("Index",       ctypes.c_ushort),
-        ("Length",      ctypes.c_ushort),
-    ]
+def _pack_setup_packet(request_type: int, request: int,
+                       value: int, index: int, length: int) -> ctypes.c_uint64:
+    """Pack a WINUSB_SETUP_PACKET into a c_uint64 for pass-by-value.
 
-
-class OVERLAPPED(ctypes.Structure):
-    """Win32 OVERLAPPED structure for async I/O."""
-    _fields_ = [
-        ("Internal",     ctypes.POINTER(ctypes.c_ulong)),
-        ("InternalHigh", ctypes.POINTER(ctypes.c_ulong)),
-        ("Offset",       wt.DWORD),
-        ("OffsetHigh",   wt.DWORD),
-        ("hEvent",       wt.HANDLE),
-    ]
+    The C API declares WinUsb_ControlTransfer(…, WINUSB_SETUP_PACKET SetupPacket, …)
+    with the 8-byte struct passed BY VALUE.  ctypes normally passes Structure
+    objects by reference (pointer), which would corrupt the call on 32-bit Python.
+    Packing the 8 bytes into a c_uint64 forces ctypes to push them onto the stack
+    as a single 64-bit value — correct on both x86 and x64.
+    """
+    raw = struct.pack('<BBHHH',
+                      request_type & 0xFF,
+                      request & 0xFF,
+                      value & 0xFFFF,
+                      index & 0xFFFF,
+                      length & 0xFFFF)
+    return ctypes.c_uint64(int.from_bytes(raw, byteorder='little'))
 
 
 def _find_device_path(vid: int, pid: int) -> str | None:
@@ -158,9 +152,11 @@ def _find_device_path(vid: int, pid: int) -> str | None:
 
 
 class WinUsbDevice:
-    """Low-level WinUSB handle wrapper."""
+    """Low-level WinUSB handle wrapper with thread-safe I/O."""
 
     def __init__(self, path: str):
+        self._lock = threading.Lock()  # Protect all USB I/O from concurrent access
+
         # Open without FILE_FLAG_OVERLAPPED for synchronous I/O
         self._file_h = kernel32.CreateFileW(
             path,
@@ -199,55 +195,51 @@ class WinUsbDevice:
                          value: int, index: int,
                          data: bytes | bytearray | None = None,
                          length: int = 0) -> bytes:
-        """Execute a USB control transfer (read or write)."""
-        pkt = WINUSB_SETUP_PACKET()
-        pkt.RequestType = request_type & 0xFF
-        pkt.Request     = request & 0xFF
-        pkt.Value       = value & 0xFFFF
-        pkt.Index       = index & 0xFFFF
-
+        """Execute a USB control transfer (read or write), thread-safe."""
         transferred = wt.ULONG(0)
 
-        if request_type & 0x80:  # Device-to-host (IN)
-            if length <= 0:
+        with self._lock:
+            if request_type & 0x80:  # Device-to-host (IN)
+                if length <= 0:
+                    return b""
+                pkt = _pack_setup_packet(request_type, request, value, index, length)
+                buf = ctypes.create_string_buffer(length)
+                ok = winusb.WinUsb_ControlTransfer(
+                    self._usb_h, pkt, buf, wt.ULONG(length),
+                    ctypes.byref(transferred), None
+                )
+                if not ok:
+                    err = ctypes.GetLastError()
+                    raise OSError(f"WinUsb_ControlTransfer IN failed (error {err})")
+                return buf.raw[:transferred.value]
+            else:  # Host-to-device (OUT)
+                if data is None or len(data) == 0:
+                    pkt = _pack_setup_packet(request_type, request, value, index, 0)
+                    ok = winusb.WinUsb_ControlTransfer(
+                        self._usb_h, pkt, None, wt.ULONG(0),
+                        ctypes.byref(transferred), None
+                    )
+                else:
+                    pkt = _pack_setup_packet(request_type, request, value, index, len(data))
+                    c_data = ctypes.create_string_buffer(bytes(data), len(data))
+                    ok = winusb.WinUsb_ControlTransfer(
+                        self._usb_h, pkt, c_data, wt.ULONG(len(data)),
+                        ctypes.byref(transferred), None
+                    )
+                if not ok:
+                    err = ctypes.GetLastError()
+                    raise OSError(f"WinUsb_ControlTransfer OUT failed (error {err})")
                 return b""
-            buf = ctypes.create_string_buffer(length)
-            pkt.Length = length
-            ok = winusb.WinUsb_ControlTransfer(
-                self._usb_h, pkt, buf, wt.ULONG(length),
-                ctypes.byref(transferred), None
-            )
-            if not ok:
-                err = ctypes.GetLastError()
-                raise OSError(f"WinUsb_ControlTransfer IN failed (error {err})")
-            return buf.raw[:transferred.value]
-        else:  # Host-to-device (OUT)
-            if data is None or len(data) == 0:
-                pkt.Length = 0
-                ok = winusb.WinUsb_ControlTransfer(
-                    self._usb_h, pkt, None, wt.ULONG(0),
-                    ctypes.byref(transferred), None
-                )
-            else:
-                pkt.Length = len(data)
-                c_data = ctypes.create_string_buffer(bytes(data), len(data))
-                ok = winusb.WinUsb_ControlTransfer(
-                    self._usb_h, pkt, c_data, wt.ULONG(len(data)),
-                    ctypes.byref(transferred), None
-                )
-            if not ok:
-                err = ctypes.GetLastError()
-                raise OSError(f"WinUsb_ControlTransfer OUT failed (error {err})")
-            return b""
 
     def bulk_read(self, endpoint: int, length: int) -> bytes:
-        """Read bulk data from USB endpoint."""
+        """Read bulk data from USB endpoint, thread-safe."""
         buf = ctypes.create_string_buffer(length)
         transferred = wt.ULONG(0)
-        ok = winusb.WinUsb_ReadPipe(
-            self._usb_h, ctypes.c_ubyte(endpoint), buf, wt.ULONG(length),
-            ctypes.byref(transferred), None
-        )
+        with self._lock:
+            ok = winusb.WinUsb_ReadPipe(
+                self._usb_h, ctypes.c_ubyte(endpoint), buf, wt.ULONG(length),
+                ctypes.byref(transferred), None
+            )
         if not ok:
             err = ctypes.GetLastError()
             raise OSError(f"WinUsb_ReadPipe failed (error {err})")
@@ -588,15 +580,29 @@ class R820T2:
 
     # ---- I2C R/W (via RTL2832U I2C bridge) ----
 
+    # RTL2832U I2C master supports max 8-byte transfers.
+    # First byte is the register address, leaving 7 bytes for data payload.
+    _MAX_I2C_MSG_LEN = 8
+    _MAX_I2C_DATA    = _MAX_I2C_MSG_LEN - 1  # 7 payload bytes per transfer
+
     def _write(self, reg: int, data: bytes | bytearray):
-        """Write to tuner registers via I2C bridge."""
+        """Write to tuner registers via I2C bridge (auto-chunked)."""
         # Update shadow copy
         r = reg - REG_SHADOW_START
         for i, b in enumerate(data):
             if 0 <= r + i < NUM_REGS:
                 self._regs[r + i] = b
-        # Send via I2C: first byte = register address, then data
-        self._rtl.i2c_write(self._addr, bytes([reg]) + bytes(data))
+
+        # The RTL2832U I2C master limits transfers to 8 bytes total
+        # (1 byte register address + up to 7 bytes data).  Chunk if needed.
+        pos = 0
+        cur_reg = reg
+        while pos < len(data):
+            chunk_len = min(self._MAX_I2C_DATA, len(data) - pos)
+            msg = bytes([cur_reg]) + bytes(data[pos:pos + chunk_len])
+            self._rtl.i2c_write(self._addr, msg)
+            pos += chunk_len
+            cur_reg += chunk_len
 
     def _write_reg(self, reg: int, val: int):
         self._write(reg, bytes([val & 0xFF]))
@@ -639,6 +645,8 @@ class R820T2:
             self._set_pll(freq_hz)
         finally:
             self._rtl.set_i2c_repeater(False)
+        # Flush any stale data from the previous frequency
+        self._rtl.reset_endpoint()
         print(f"[r820t2] Tuned to {freq_hz / 1e6:.3f} MHz")
 
     def _set_mux(self, freq_hz: int):
