@@ -724,13 +724,13 @@ class R820T2:
 
         # If nint > 63, switch to reference divider /2 mode
         if nint > 63:
-            nint = vco_freq // (4 * pll_ref)
-            vco_fra = vco_freq - 4 * pll_ref * nint
+            nint = vco_freq // pll_ref
+            vco_fra = vco_freq - pll_ref * nint
             self._write_reg_mask(0x10, 0x10, 0x10)  # refdiv2 = 1
-            pll_ref_sdm = pll_ref * 2  # effective ref for SDM calc
+            pll_ref_sdm = pll_ref
         else:
             self._write_reg_mask(0x10, 0x00, 0x10)  # refdiv2 = 0
-            pll_ref_sdm = pll_ref
+            pll_ref_sdm = 2 * pll_ref
 
         # Clamp nint to valid range (13..76 per R820T2 datasheet)
         nint = max(13, min(76, nint))
