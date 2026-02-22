@@ -51,6 +51,7 @@ MAGIC = struct.pack('>4sII', b'RTL0', 5, 29)
 COMMAND_NAMES = {
     1: 'SET_FREQ',  2: 'SET_RATE',  3: 'SET_GAIN_MODE',
     4: 'SET_GAIN',  5: 'SET_PPM',   6: 'SET_IF_GAIN',  8: 'SET_AGC',
+    9: 'SET_DIRECT_SAMP',
 }
 
 

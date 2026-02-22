@@ -669,8 +669,11 @@ def main() -> None:
 
     # Enable direct sampling for frequencies below 24 MHz
     if freq_mhz < 24.0:
-        tcp.set_direct_sampling(2)   # Q-ADC input (most common mod)
-        print("Direct sampling mode enabled (Q-ADC) for sub-24 MHz reception")
+        try:
+            tcp.set_direct_sampling(2)   # Q-ADC input (most common mod)
+            print("Direct sampling mode requested (Q-ADC) for sub-24 MHz reception")
+        except Exception as e:
+            print(f"Warning: Could not enable direct sampling: {e}")
 
     # ── Start audio output ──────────────────────────────────────────────────
     audio_out: WinAudioOut | None = None
